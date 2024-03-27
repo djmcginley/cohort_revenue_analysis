@@ -29,6 +29,6 @@ FROM installs_data i
   LEFT JOIN forecast_data f ON r.revenue_user_id = u.user_id
 WHERE 1=1
   AND spend_date >= '2022-01-01'
-GROUP BY 1
-ORDER BY 1
+GROUP BY 1,2,3,4,5
+ORDER BY 1,2,3,4,5
 ;
