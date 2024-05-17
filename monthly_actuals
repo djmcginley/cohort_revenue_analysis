@@ -123,3 +123,4 @@ FROM monthly_registrations m
   LEFT JOIN monthly_revenue p              ON m.reg_month = p.month
   LEFT JOIN marketing_spend s              ON m.reg_month = s.month
 ORDER BY 1,2
+;
