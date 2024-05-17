@@ -1,0 +1,125 @@
+-- The below is a monthly cohort revenue data model that I built to be used for monitoring MoM KPI performance for new incoming cohorts
+
+WITH monthly_registrations AS (
+SELECT
+    DATE_TRUNC('month',registration_at) AS reg_month
+  , COUNT(DISTINCT id) AS registrations
+FROM registrations
+WHERE 1=1
+  AND DATE_TRUNC('month',registration_at) <= DATEADD(month,-1,CURRENT_DATE) -- monthly cohort is at least 1 month old
+GROUP BY 1
+)
+
+,monthly_cohort_actuals AS (
+SELECT    
+    DATE_TRUNC('month',r.registration_at) AS reg_month 
+  , SUM(CASE WHEN p.months_since_registration = 0 THEN payment_amount END) AS m0_cohort_actuals
+  , SUM(CASE WHEN p.months_since_registration < 12 THEN payment_amount END) AS one_year_cohort_actuals
+  , SUM(CASE WHEN p.months_since_registration < 24 THEN payment_amount END) AS two_year_cohort_actuals
+FROM registrations r
+  LEFT JOIN payments p 
+    ON r.id = p.user_id 
+GROUP BY 1
+)
+
+,monthly_cvr_data AS (
+SELECT
+    DATE_TRUNC('month',r.registration_at) AS reg_month
+  , COUNT(DISTINCT r.id) AS registrations
+  , COUNT(DISTINCT CASE WHEN u.m0_payer_type = 'Monthly Sub' THEN r.id END) AS m0_monthly_subs
+  , COUNT(DISTINCT CASE WHEN u.m0_payer_type = 'Annual Sub' THEN r.id END) AS m0_annual_subs
+  , SUM(CASE WHEN u.m0_payer_type = 'Monthly Sub' THEN p.payment_amount END) AS m0_monthly_sub_payments
+  , SUM(CASE WHEN u.m0_payer_type = 'Annual Sub' THEN p.payment_amount END) AS m0_annual_sub_payments
+  , m0_monthly_subs::FLOAT / registrations AS monthly_sub_m0_cvr
+  , m0_annual_subs::FLOAT / registrations AS annual_sub_m0_cvr
+  , m0_monthly_sub_payments::FLOAT /  m0_monthly_subs AS monthly_sub_m0_arpu
+  , m0_annual_sub_payments::FLOAT /  m0_annual_subs AS annual_sub_m0_arpu
+FROM registrations r
+  LEFT JOIN {{ ref('user_details') }} u ON r.customer_id = u.customer_id
+  LEFT JOIN {{ ref('payment_record_analytics') }} p ON r.customer_id = p.customer_id AND p.days_since_registration >= 0 AND p.days_since_registration <= 30
+WHERE 1=1
+  AND DATE_TRUNC('month',r.registration_at) <= DATEADD(month,-1,CURRENT_DATE) -- monthly cohort is at least 2 months old (enough time for m0 payment data to completee)
+GROUP BY 1
+)
+
+,monthly_sub_retention AS (
+SELECT
+    DATE_TRUNC('month',registration_at) AS reg_month
+  , MIN(max_month_reached) AS max_month_reached
+  , SUM(CASE WHEN month = 0 THEN forecasted_payments END) AS m0_payments
+  , SUM(CASE WHEN month = 1 THEN forecasted_payments END) AS m1_payments
+  , SUM(CASE WHEN month = 2 THEN forecasted_payments END) AS m2_payments
+  , m1_payments/m0_payments::FLOAT AS m1_retention
+  , m2_payments/m1_payments::FLOAT AS m2_retention
+FROM user_forecasts
+WHERE 1=1
+  AND month IN (0,1,2)
+  AND M0_payer_type ILIKE '%Monthly%'
+GROUP BY 1
+)
+
+,cohort_forecast_revenue AS (
+SELECT
+    DATE_TRUNC('month',registration_at) AS reg_month
+  , SUM(CASE WHEN month BETWEEN 0 AND 24 THEN forecasted_payments END) AS m24_forecasted_payments
+  , SUM(forecasted_payments) AS all_forecasted_payments
+FROM user_forecasts
+GROUP BY 1
+)
+
+,monthly_revenue AS (
+SELECT
+    DATE_TRUNC('month',p.payment_at) AS month
+  , SUM(p.payment_amount) AS total_payments
+FROM payments p
+  LEFT JOIN registrations r 
+    ON p.customer_id = r.id
+GROUP BY 1
+)
+
+,marketing_spend AS (
+SELECT
+    DATE_TRUNC('month',spend_date) AS month
+  , SUM(spend) AS marketing_spend
+FROM ad_spend
+GROUP BY 1
+)
+
+SELECT
+    m.reg_month AS month
+  , s.marketing_spend
+  , m.registrations
+  , p.total_payments
+  , a.m0_cohort_actuals
+  , a.one_year_cohort_actuals
+  , a.two_year_cohort_actuals
+  , c.m0_monthly_subs
+  , c.m0_annual_subs
+  , c.m0_credit_only_payers
+  , c.m0_monthly_sub_payments
+  , c.m0_annual_sub_payments
+  , c.m0_credit_only_payments
+  , c.monthly_sub_m0_cvr
+  , c.annual_sub_m0_cvr
+  , c.credit_only_m0_cvr
+  , c.monthly_sub_m0_arpu
+  , c.annual_sub_m0_arpu
+  , c.credit_only_m0_arpu
+  , r.max_month_reached
+  , r.m0_payments  
+  , r.m1_payments
+  , r.m2_payments
+  , CASE WHEN r.max_month_reached >= 0 THEN m1_retention END AS monthly_sub_m1_retention
+  , CASE WHEN r.max_month_reached >= 1 THEN m2_retention END AS monthly_sub_m2_retention
+  , f.m24_forecasted_payments
+  , f.all_forecasted_payments AS total_forecasted_payments
+  , f.m24_forecasted_payments::FLOAT / m.registrations AS m24_cohort_arpu
+  , f.all_forecasted_payments::FLOAT / m.registrations AS cohort_ltv_per_user
+FROM monthly_registrations m
+  LEFT JOIN monthly_cohort_actuals a       ON m.reg_month = a.reg_month
+  LEFT JOIN monthly_cvr_data c             ON m.reg_month = c.reg_month
+  LEFT JOIN monthly_sub_retention r        ON m.reg_month = r.reg_month
+  LEFT JOIN cohort_forecast_revenue f      ON m.reg_month = f.reg_month
+  LEFT JOIN monthly_revenue p              ON m.reg_month = p.month
+  LEFT JOIN marketing_spend s              ON m.reg_month = s.month
+ORDER BY 1,2
